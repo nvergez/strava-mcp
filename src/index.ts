@@ -2,7 +2,10 @@ import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
+import {
+  mcpAuthRouter,
+  getOAuthProtectedResourceMetadataUrl,
+} from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { StravaOAuthProvider } from './strava-auth-provider.js';
 import { initDb, deleteExpiredRecords } from './db.js';
@@ -48,6 +51,9 @@ const authLimiter = rateLimit({
 });
 app.use(['/authorize', '/token', '/register', '/strava/callback'], authLimiter);
 
+// The MCP resource server URL — used for protected resource metadata
+const mcpServerUrl = new URL('/mcp', config.baseUrl);
+
 // Mount the OAuth auth router at the root (handles /authorize, /token, /register,
 // /.well-known/oauth-authorization-server, /.well-known/oauth-protected-resource)
 app.use(
@@ -55,6 +61,7 @@ app.use(
     provider,
     issuerUrl: new URL(config.baseUrl),
     scopesSupported: config.scopes,
+    resourceServerUrl: mcpServerUrl,
   }),
 );
 
@@ -82,7 +89,11 @@ app.get('/strava/callback', async (req, res) => {
 });
 
 // Bearer auth middleware for MCP endpoints
-const bearerAuth = requireBearerAuth({ verifier: provider });
+const bearerAuth = requireBearerAuth({
+  verifier: provider,
+  requiredScopes: config.scopes,
+  resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(mcpServerUrl),
+});
 
 // Stateless MCP transport: a fresh transport + McpServer is created per request.
 // No session state is kept in memory, so server restarts are invisible to clients.

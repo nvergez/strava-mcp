@@ -25,3 +25,8 @@ export interface StoredToken {
   stravaAccessToken: string;
   stravaRefreshToken: string;
 }
+
+export interface StoredRefreshToken {
+  clientId: string;
+  stravaRefreshToken: string;
+}

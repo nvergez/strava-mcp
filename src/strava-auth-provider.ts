@@ -124,6 +124,9 @@ export class StravaOAuthProvider implements OAuthServerProvider {
   async exchangeAuthorizationCode(
     client: OAuthClientInformationFull,
     authorizationCode: string,
+    _codeVerifier?: string,
+    _redirectUri?: string,
+    _resource?: URL,
   ): Promise<OAuthTokens> {
     const stored = db.getAuthCode(this.database, authorizationCode);
     if (!stored) {
@@ -148,24 +151,48 @@ export class StravaOAuthProvider implements OAuthServerProvider {
       stravaRefreshToken: stored.stravaRefreshToken,
     });
 
+    // Mint an opaque refresh token — never expose the real Strava refresh token
+    const opaqueRefreshToken = randomBytes(32).toString('hex');
+
+    db.saveRefreshToken(this.database, opaqueRefreshToken, {
+      clientId: stored.clientId,
+      stravaRefreshToken: stored.stravaRefreshToken,
+    });
+
     log.info(`Token issued for client ${stored.clientId}`);
 
     return {
       access_token: opaqueToken,
       token_type: 'bearer',
       expires_in: stored.stravaExpiresAt - Math.floor(Date.now() / 1000),
-      refresh_token: stored.stravaRefreshToken,
-      scope: stored.scopes.join(','),
+      refresh_token: opaqueRefreshToken,
+      scope: stored.scopes.join(' '),
     };
   }
 
   /**
-   * Refreshes tokens by calling Strava's token endpoint.
+   * Refreshes tokens by resolving the opaque refresh token, calling Strava,
+   * and minting new opaque access + refresh tokens (rotation).
    */
   async exchangeRefreshToken(
-    _client: OAuthClientInformationFull,
+    client: OAuthClientInformationFull,
     refreshToken: string,
+    _scopes?: string[],
+    _resource?: URL,
   ): Promise<OAuthTokens> {
+    // Resolve the opaque refresh token to the real Strava refresh token
+    const storedRefresh = db.getRefreshToken(this.database, refreshToken);
+    if (!storedRefresh) {
+      throw new Error('Invalid refresh token');
+    }
+
+    if (storedRefresh.clientId !== client.client_id) {
+      throw new Error('Refresh token does not belong to this client');
+    }
+
+    // Delete the old opaque refresh token (rotation — single use)
+    db.deleteRefreshToken(this.database, refreshToken);
+
     const response = await fetch(this.config.tokenUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -173,7 +200,7 @@ export class StravaOAuthProvider implements OAuthServerProvider {
         client_id: this.config.clientId,
         client_secret: this.config.clientSecret,
         grant_type: 'refresh_token',
-        refresh_token: refreshToken,
+        refresh_token: storedRefresh.stravaRefreshToken,
       }),
     });
 
@@ -194,20 +221,29 @@ export class StravaOAuthProvider implements OAuthServerProvider {
     const opaqueToken = randomBytes(32).toString('hex');
 
     db.saveAccessToken(this.database, opaqueToken, {
-      clientId: _client.client_id,
+      clientId: client.client_id,
       scopes: this.config.scopes,
       expiresAt: data.expires_at,
       stravaAccessToken: data.access_token,
       stravaRefreshToken: data.refresh_token,
     });
 
-    log.info(`Token refreshed for client ${_client.client_id}`);
+    // Mint a new opaque refresh token
+    const opaqueRefreshToken = randomBytes(32).toString('hex');
+
+    db.saveRefreshToken(this.database, opaqueRefreshToken, {
+      clientId: client.client_id,
+      stravaRefreshToken: data.refresh_token,
+    });
+
+    log.info(`Token refreshed for client ${client.client_id}`);
 
     return {
       access_token: opaqueToken,
       token_type: 'bearer',
       expires_in: data.expires_in,
-      refresh_token: data.refresh_token,
+      refresh_token: opaqueRefreshToken,
+      scope: this.config.scopes.join(' '),
     };
   }
 
@@ -240,11 +276,10 @@ export class StravaOAuthProvider implements OAuthServerProvider {
     _client: OAuthClientInformationFull,
     request: OAuthTokenRevocationRequest,
   ): Promise<void> {
+    // Try revoking as an access token first
     const stored = db.getAccessToken(this.database, request.token);
-    db.deleteAccessToken(this.database, request.token);
-
-    // Also revoke upstream Strava token
     if (stored) {
+      db.deleteAccessToken(this.database, request.token);
       log.info(`Revoking Strava token for client ${stored.clientId}`);
       try {
         await fetch('https://www.strava.com/oauth/deauthorize', {
@@ -257,7 +292,11 @@ export class StravaOAuthProvider implements OAuthServerProvider {
       } catch (err) {
         log.error('Failed to revoke upstream Strava token:', err);
       }
+      return;
     }
+
+    // If not found as access token, try revoking as a refresh token
+    db.deleteRefreshToken(this.database, request.token);
   }
 
   /**

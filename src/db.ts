@@ -1,14 +1,24 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { PendingAuthorization, StoredAuthCode, StoredToken } from './types.js';
+import type {
+  PendingAuthorization,
+  StoredAuthCode,
+  StoredToken,
+  StoredRefreshToken,
+} from './types.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('db');
 
 // Re-export the type so consumers don't need to import from node:sqlite
 export type { DatabaseSync };
-export type { PendingAuthorization, StoredAuthCode, StoredToken } from './types.js';
+export type {
+  PendingAuthorization,
+  StoredAuthCode,
+  StoredToken,
+  StoredRefreshToken,
+} from './types.js';
 
 // ---------------------------------------------------------------------------
 // Row shapes returned by SQLite queries (columns use snake_case)
@@ -47,6 +57,13 @@ interface AccessTokenRow {
   expires_at: number;
   strava_access_token: string;
   strava_refresh_token: string;
+}
+
+interface RefreshTokenRow {
+  token: string;
+  client_id: string;
+  strava_refresh_token: string;
+  created_at: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +113,13 @@ export function initDb(dbPath: string): DatabaseSync {
       expires_at           INTEGER NOT NULL,
       strava_access_token  TEXT NOT NULL,
       strava_refresh_token TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS refresh_tokens (
+      token                TEXT PRIMARY KEY,
+      client_id            TEXT NOT NULL,
+      strava_refresh_token TEXT NOT NULL,
+      created_at           INTEGER NOT NULL
     );
   `);
 
@@ -260,8 +284,37 @@ export function deleteAccessToken(db: DatabaseSync, token: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Refresh tokens (opaque → real Strava refresh token)
+// ---------------------------------------------------------------------------
+
+export function getRefreshToken(db: DatabaseSync, token: string): StoredRefreshToken | undefined {
+  const row = db.prepare('SELECT * FROM refresh_tokens WHERE token = ?').get(token) as
+    | RefreshTokenRow
+    | undefined;
+  if (!row) return undefined;
+  return {
+    clientId: row.client_id,
+    stravaRefreshToken: row.strava_refresh_token,
+  };
+}
+
+export function saveRefreshToken(db: DatabaseSync, token: string, data: StoredRefreshToken): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO refresh_tokens
+       (token, client_id, strava_refresh_token, created_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(token, data.clientId, data.stravaRefreshToken, Math.floor(Date.now() / 1000));
+}
+
+export function deleteRefreshToken(db: DatabaseSync, token: string): void {
+  db.prepare('DELETE FROM refresh_tokens WHERE token = ?').run(token);
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
+
+const REFRESH_TOKEN_TTL = 90 * 24 * 60 * 60; // 90 days
 
 export function deleteExpiredRecords(db: DatabaseSync): number {
   const now = Math.floor(Date.now() / 1000);
@@ -272,5 +325,13 @@ export function deleteExpiredRecords(db: DatabaseSync): number {
   const codes = db
     .prepare('DELETE FROM authorization_codes WHERE created_at <= ?')
     .run(now - AUTH_CODE_TTL);
-  return Number(tokens.changes) + Number(pending.changes) + Number(codes.changes);
+  const refreshTokens = db
+    .prepare('DELETE FROM refresh_tokens WHERE created_at <= ?')
+    .run(now - REFRESH_TOKEN_TTL);
+  return (
+    Number(tokens.changes) +
+    Number(pending.changes) +
+    Number(codes.changes) +
+    Number(refreshTokens.changes)
+  );
 }
