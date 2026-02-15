@@ -30,6 +30,10 @@ const provider = new StravaOAuthProvider(
 
 const app = express();
 
+// Trust the first proxy (Fly.io reverse proxy) so X-Forwarded-For is used for
+// rate limiting and req.ip reflects the real client address.
+app.set('trust proxy', 1);
+
 // Health check for load balancers / Fly.io
 app.get('/healthz', (_req, res) => {
   res.status(200).json({ status: 'ok' });
