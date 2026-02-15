@@ -37,10 +37,10 @@ pnpm start
 
 The server starts on the configured port and exposes:
 
-- `POST /mcp` — JSON-RPC requests
-- `GET /mcp` — SSE event stream
-- `DELETE /mcp` — terminate session
+- `POST /mcp` — JSON-RPC requests (stateless — no sessions)
 - `/authorize`, `/token`, `/register` — OAuth 2.0 endpoints
+- `/.well-known/oauth-authorization-server` — OAuth authorization server metadata
+- `/.well-known/oauth-protected-resource/mcp` — OAuth protected resource metadata
 - `/strava/callback` — Strava OAuth redirect
 
 ## Tools

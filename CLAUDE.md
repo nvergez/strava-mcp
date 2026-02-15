@@ -34,7 +34,7 @@ This is a **Model Context Protocol (MCP) server** that exposes Strava's read-onl
 
 - **`src/strava-auth-provider.ts`** — Bridges MCP OAuth to Strava OAuth. Strava doesn't support PKCE, so PKCE is validated locally. Issues **opaque bearer tokens** to MCP clients (real Strava tokens are never exposed). Implements `OAuthServerProvider` from the MCP SDK.
 
-- **`src/db.ts`** — SQLite persistence via `node:sqlite` (DatabaseSync). Four tables: `oauth_clients`, `pending_authorizations`, `authorization_codes`, `access_tokens`. TTL-based expiry with periodic cleanup (15-min interval).
+- **`src/db.ts`** — SQLite persistence via `node:sqlite` (DatabaseSync). Five tables: `oauth_clients`, `pending_authorizations`, `authorization_codes`, `access_tokens`, `refresh_tokens`. TTL-based expiry with periodic cleanup (15-min interval).
 
 - **`src/strava-client.ts`** — Shared utilities for calling Strava API: resolves opaque tokens to real Strava tokens, authenticated fetch helpers, pagination/query-string builders.
 
@@ -48,6 +48,6 @@ This is a **Model Context Protocol (MCP) server** that exposes Strava's read-onl
 
 ### Design decisions
 
-- **Opaque tokens**: MCP clients never see real Strava credentials. The server maps its own bearer tokens to stored Strava access/refresh tokens.
+- **Opaque tokens**: MCP clients never see real Strava credentials. Both access and refresh tokens issued to clients are opaque — the server maps them to stored Strava tokens. Refresh tokens are rotated on each use.
 - **All tools are read-only**: No mutation tools exist by design. Strava API rate limits apply (100 req/15 min, 1000/day).
 - **Zod v4**: Input validation uses Zod v4 (not v3) — the API surface differs (e.g., `z.string().optional()` vs `z.optional(z.string())`).
