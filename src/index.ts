@@ -103,7 +103,7 @@ function createMcpServer(): McpServer {
     version: '0.1.0',
   });
 
-  registerTools(server);
+  registerTools(server, database, config.stravaApiBase);
 
   return server;
 }

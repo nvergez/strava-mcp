@@ -12,6 +12,7 @@ export interface Config {
   stravaAuthorizeUrl: string;
   stravaTokenUrl: string;
   stravaCallbackPath: string;
+  stravaApiBase: string;
   scopes: string[];
 }
 
@@ -43,6 +44,7 @@ export function loadConfig(): Config {
     stravaAuthorizeUrl: 'https://www.strava.com/oauth/authorize',
     stravaTokenUrl: 'https://www.strava.com/api/v3/oauth/token',
     stravaCallbackPath: '/strava/callback',
+    stravaApiBase: 'https://www.strava.com/api/v3',
     scopes: ['read', 'read_all', 'activity:read', 'activity:read_all'],
   };
 }
