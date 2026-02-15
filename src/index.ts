@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { StravaOAuthProvider } from './strava-auth-provider.js';
-import { initDb } from './db.js';
+import { initDb, deleteExpiredRecords } from './db.js';
 import { loadConfig } from './config.js';
 import { registerTools } from './tools.js';
 import { createLogger } from './logger.js';
@@ -29,6 +30,16 @@ const provider = new StravaOAuthProvider(
 
 const app = express();
 
+// Rate limiting for auth endpoints (applies to /authorize, /token, /register, /strava/callback)
+const authLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  limit: 50,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later' },
+});
+app.use(['/authorize', '/token', '/register', '/strava/callback'], authLimiter);
+
 // Mount the OAuth auth router at the root (handles /authorize, /token, /register,
 // /.well-known/oauth-authorization-server, /.well-known/oauth-protected-resource)
 app.use(
@@ -44,7 +55,7 @@ app.get('/strava/callback', async (req, res) => {
   const { code, state, error } = req.query as Record<string, string | undefined>;
 
   if (error) {
-    res.status(400).send(`Strava authorization error: ${error}`);
+    res.status(400).type('text/plain').send(`Strava authorization error: ${error}`);
     return;
   }
 
@@ -66,7 +77,25 @@ app.get('/strava/callback', async (req, res) => {
 const bearerAuth = requireBearerAuth({ verifier: provider });
 
 // MCP transport management: one transport per session
+const MAX_SESSIONS = 100;
+const SESSION_IDLE_MS = 30 * 60 * 1000; // 30 minutes
 const transports = new Map<string, StreamableHTTPServerTransport>();
+const sessionLastSeen = new Map<string, number>();
+
+function evictStaleSessions(): void {
+  const now = Date.now();
+  for (const [id, lastSeen] of sessionLastSeen) {
+    if (now - lastSeen > SESSION_IDLE_MS) {
+      const transport = transports.get(id);
+      if (transport) {
+        log.debug(`Evicting idle session: ${id}`);
+        transport.close?.();
+        transports.delete(id);
+      }
+      sessionLastSeen.delete(id);
+    }
+  }
+}
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -81,7 +110,11 @@ function createMcpServer(): McpServer {
 
 function getTransport(sessionId: string | undefined): StreamableHTTPServerTransport | undefined {
   if (!sessionId) return undefined;
-  return transports.get(sessionId);
+  const transport = transports.get(sessionId);
+  if (transport) {
+    sessionLastSeen.set(sessionId, Date.now());
+  }
+  return transport;
 }
 
 // POST /mcp — handles JSON-RPC messages (including initialization)
@@ -100,6 +133,15 @@ app.post('/mcp', bearerAuth, async (req, res) => {
     return;
   }
 
+  // Evict stale sessions before creating new ones
+  evictStaleSessions();
+
+  if (transports.size >= MAX_SESSIONS) {
+    log.warn(`Max sessions reached (${MAX_SESSIONS}), rejecting new connection`);
+    res.status(503).json({ error: 'Too many active sessions' });
+    return;
+  }
+
   // New session — create transport and server
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
@@ -111,6 +153,7 @@ app.post('/mcp', bearerAuth, async (req, res) => {
     if (transport.sessionId) {
       log.debug(`Session closed: ${transport.sessionId}`);
       transports.delete(transport.sessionId);
+      sessionLastSeen.delete(transport.sessionId);
     }
   };
 
@@ -120,6 +163,7 @@ app.post('/mcp', bearerAuth, async (req, res) => {
   if (transport.sessionId) {
     log.debug(`Session created: ${transport.sessionId}`);
     transports.set(transport.sessionId, transport);
+    sessionLastSeen.set(transport.sessionId, Date.now());
   }
 });
 
@@ -144,6 +188,17 @@ app.delete('/mcp', bearerAuth, async (req, res) => {
   }
   await transport.handleRequest(req, res);
 });
+
+// Periodic cleanup of expired tokens, auth codes, and pending authorizations
+const CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+function runCleanup(): void {
+  const deleted = deleteExpiredRecords(database);
+  if (deleted > 0) {
+    log.info(`Cleanup: removed ${deleted} expired record(s)`);
+  }
+}
+runCleanup(); // Run at startup
+setInterval(runCleanup, CLEANUP_INTERVAL_MS);
 
 app.listen(config.port, () => {
   log.info(`Strava MCP server listening on ${config.baseUrl}`);

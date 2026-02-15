@@ -27,6 +27,13 @@ export function loadConfig(): Config {
   const port = parseInt(process.env.PORT || '3000', 10);
   const baseUrl = process.env.BASE_URL || `http://localhost:${port}`;
 
+  if (process.env.NODE_ENV === 'production' && !baseUrl.startsWith('https://')) {
+    log.warn(
+      'BASE_URL does not use HTTPS. OAuth tokens will be transmitted in the clear. ' +
+        'Set BASE_URL to an https:// URL in production.',
+    );
+  }
+
   return {
     stravaClientId,
     stravaClientSecret,

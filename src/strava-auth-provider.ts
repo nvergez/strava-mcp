@@ -48,6 +48,7 @@ class SqliteClientsStore implements OAuthRegisteredClientsStore {
       fullClient.client_id,
       fullClient as unknown as Record<string, unknown>,
     );
+    log.info(`Client registered: ${fullClient.client_id}`);
     return fullClient;
   }
 }
@@ -103,12 +104,15 @@ export class StravaOAuthProvider implements OAuthServerProvider {
    * Returns the stored PKCE challenge for SDK-side validation.
    */
   async challengeForAuthorizationCode(
-    _client: OAuthClientInformationFull,
+    client: OAuthClientInformationFull,
     authorizationCode: string,
   ): Promise<string> {
     const stored = db.getAuthCode(this.database, authorizationCode);
     if (!stored) {
       throw new Error('Unknown authorization code');
+    }
+    if (stored.clientId !== client.client_id) {
+      throw new Error('Authorization code does not belong to this client');
     }
     return stored.codeChallenge;
   }
@@ -118,7 +122,7 @@ export class StravaOAuthProvider implements OAuthServerProvider {
    * The SDK has already validated PKCE by this point.
    */
   async exchangeAuthorizationCode(
-    _client: OAuthClientInformationFull,
+    client: OAuthClientInformationFull,
     authorizationCode: string,
   ): Promise<OAuthTokens> {
     const stored = db.getAuthCode(this.database, authorizationCode);
@@ -126,19 +130,28 @@ export class StravaOAuthProvider implements OAuthServerProvider {
       throw new Error('Unknown authorization code');
     }
 
+    if (stored.clientId !== client.client_id) {
+      throw new Error('Authorization code does not belong to this client');
+    }
+
     // Remove the code — it's single-use
     db.deleteAuthCode(this.database, authorizationCode);
 
-    // Store the access token for later verification
-    db.saveAccessToken(this.database, stored.stravaAccessToken, {
+    // Mint an opaque MCP bearer token — never expose the real Strava token
+    const opaqueToken = randomBytes(32).toString('hex');
+
+    db.saveAccessToken(this.database, opaqueToken, {
       clientId: stored.clientId,
       scopes: stored.scopes,
       expiresAt: stored.stravaExpiresAt,
+      stravaAccessToken: stored.stravaAccessToken,
       stravaRefreshToken: stored.stravaRefreshToken,
     });
 
+    log.info(`Token issued for client ${stored.clientId}`);
+
     return {
-      access_token: stored.stravaAccessToken,
+      access_token: opaqueToken,
       token_type: 'bearer',
       expires_in: stored.stravaExpiresAt - Math.floor(Date.now() / 1000),
       refresh_token: stored.stravaRefreshToken,
@@ -167,7 +180,7 @@ export class StravaOAuthProvider implements OAuthServerProvider {
     if (!response.ok) {
       const errorBody = await response.text();
       log.error(`Strava token refresh failed: ${response.status} ${errorBody}`);
-      throw new Error(`Strava token refresh failed: ${response.status} ${errorBody}`);
+      throw new Error('Token refresh failed');
     }
 
     const data = (await response.json()) as {
@@ -177,16 +190,21 @@ export class StravaOAuthProvider implements OAuthServerProvider {
       expires_in: number;
     };
 
-    // Update stored token
-    db.saveAccessToken(this.database, data.access_token, {
+    // Mint a new opaque MCP bearer token
+    const opaqueToken = randomBytes(32).toString('hex');
+
+    db.saveAccessToken(this.database, opaqueToken, {
       clientId: _client.client_id,
       scopes: this.config.scopes,
       expiresAt: data.expires_at,
+      stravaAccessToken: data.access_token,
       stravaRefreshToken: data.refresh_token,
     });
 
+    log.info(`Token refreshed for client ${_client.client_id}`);
+
     return {
-      access_token: data.access_token,
+      access_token: opaqueToken,
       token_type: 'bearer',
       expires_in: data.expires_in,
       refresh_token: data.refresh_token,
@@ -199,12 +217,13 @@ export class StravaOAuthProvider implements OAuthServerProvider {
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const stored = db.getAccessToken(this.database, token);
     if (!stored) {
+      log.warn(`Access token verification failed: unknown token`);
       throw new Error('Invalid access token');
     }
 
     const now = Math.floor(Date.now() / 1000);
     if (stored.expiresAt <= now) {
-      log.debug(`Removing expired access token for client ${stored.clientId}`);
+      log.info(`Access token expired for client ${stored.clientId}`);
       db.deleteAccessToken(this.database, token);
       throw new Error('Access token expired');
     }
@@ -221,7 +240,24 @@ export class StravaOAuthProvider implements OAuthServerProvider {
     _client: OAuthClientInformationFull,
     request: OAuthTokenRevocationRequest,
   ): Promise<void> {
+    const stored = db.getAccessToken(this.database, request.token);
     db.deleteAccessToken(this.database, request.token);
+
+    // Also revoke upstream Strava token
+    if (stored) {
+      log.info(`Revoking Strava token for client ${stored.clientId}`);
+      try {
+        await fetch('https://www.strava.com/oauth/deauthorize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            access_token: stored.stravaAccessToken,
+          }),
+        });
+      } catch (err) {
+        log.error('Failed to revoke upstream Strava token:', err);
+      }
+    }
   }
 
   /**
@@ -254,7 +290,8 @@ export class StravaOAuthProvider implements OAuthServerProvider {
 
     if (!tokenResponse.ok) {
       const errorBody = await tokenResponse.text();
-      throw new Error(`Strava token exchange failed: ${tokenResponse.status} ${errorBody}`);
+      log.error(`Strava token exchange failed: ${tokenResponse.status} ${errorBody}`);
+      throw new Error('Strava authorization failed');
     }
 
     const tokenData = (await tokenResponse.json()) as {

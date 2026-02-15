@@ -22,5 +22,6 @@ export interface StoredToken {
   clientId: string;
   scopes: string[];
   expiresAt: number;
+  stravaAccessToken: string;
   stravaRefreshToken: string;
 }

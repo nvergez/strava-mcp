@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { PendingAuthorization, StoredAuthCode, StoredToken } from './types.js';
 import { createLogger } from './logger.js';
@@ -45,6 +45,7 @@ interface AccessTokenRow {
   client_id: string;
   scopes: string; // JSON array
   expires_at: number;
+  strava_access_token: string;
   strava_refresh_token: string;
 }
 
@@ -53,10 +54,13 @@ interface AccessTokenRow {
 // ---------------------------------------------------------------------------
 
 export function initDb(dbPath: string): DatabaseSync {
-  mkdirSync(dirname(dbPath), { recursive: true });
+  const dir = dirname(dbPath);
+  mkdirSync(dir, { recursive: true });
+  chmodSync(dir, 0o700);
 
   log.info(`Database opened at ${dbPath}`);
   const db = new DatabaseSync(dbPath);
+  chmodSync(dbPath, 0o600);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS oauth_clients (
@@ -90,6 +94,7 @@ export function initDb(dbPath: string): DatabaseSync {
       client_id            TEXT NOT NULL,
       scopes               TEXT NOT NULL,
       expires_at           INTEGER NOT NULL,
+      strava_access_token  TEXT NOT NULL,
       strava_refresh_token TEXT NOT NULL
     );
   `);
@@ -120,6 +125,13 @@ export function saveClient(
 }
 
 // ---------------------------------------------------------------------------
+// TTL constants (seconds)
+// ---------------------------------------------------------------------------
+
+const PENDING_AUTH_TTL = 10 * 60; // 10 minutes
+const AUTH_CODE_TTL = 60; // 60 seconds
+
+// ---------------------------------------------------------------------------
 // Pending authorizations
 // ---------------------------------------------------------------------------
 
@@ -128,6 +140,13 @@ export function getPendingAuth(db: DatabaseSync, state: string): PendingAuthoriz
     | PendingAuthRow
     | undefined;
   if (!row) return undefined;
+
+  const now = Math.floor(Date.now() / 1000);
+  if (now - row.created_at > PENDING_AUTH_TTL) {
+    db.prepare('DELETE FROM pending_authorizations WHERE state = ?').run(state);
+    return undefined;
+  }
+
   return {
     codeChallenge: row.code_challenge,
     redirectUri: row.redirect_uri,
@@ -164,6 +183,13 @@ export function getAuthCode(db: DatabaseSync, code: string): StoredAuthCode | un
     | AuthCodeRow
     | undefined;
   if (!row) return undefined;
+
+  const now = Math.floor(Date.now() / 1000);
+  if (now - row.created_at > AUTH_CODE_TTL) {
+    db.prepare('DELETE FROM authorization_codes WHERE code = ?').run(code);
+    return undefined;
+  }
+
   return {
     stravaAccessToken: row.strava_access_token,
     stravaRefreshToken: row.strava_refresh_token,
@@ -209,6 +235,7 @@ export function getAccessToken(db: DatabaseSync, token: string): StoredToken | u
     clientId: row.client_id,
     scopes: JSON.parse(row.scopes) as string[],
     expiresAt: row.expires_at,
+    stravaAccessToken: row.strava_access_token,
     stravaRefreshToken: row.strava_refresh_token,
   };
 }
@@ -216,9 +243,16 @@ export function getAccessToken(db: DatabaseSync, token: string): StoredToken | u
 export function saveAccessToken(db: DatabaseSync, token: string, data: StoredToken): void {
   db.prepare(
     `INSERT OR REPLACE INTO access_tokens
-       (token, client_id, scopes, expires_at, strava_refresh_token)
-     VALUES (?, ?, ?, ?, ?)`,
-  ).run(token, data.clientId, JSON.stringify(data.scopes), data.expiresAt, data.stravaRefreshToken);
+       (token, client_id, scopes, expires_at, strava_access_token, strava_refresh_token)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    token,
+    data.clientId,
+    JSON.stringify(data.scopes),
+    data.expiresAt,
+    data.stravaAccessToken,
+    data.stravaRefreshToken,
+  );
 }
 
 export function deleteAccessToken(db: DatabaseSync, token: string): void {
@@ -229,7 +263,14 @@ export function deleteAccessToken(db: DatabaseSync, token: string): void {
 // Cleanup
 // ---------------------------------------------------------------------------
 
-export function deleteExpiredTokens(db: DatabaseSync): void {
+export function deleteExpiredRecords(db: DatabaseSync): number {
   const now = Math.floor(Date.now() / 1000);
-  db.prepare('DELETE FROM access_tokens WHERE expires_at <= ?').run(now);
+  const tokens = db.prepare('DELETE FROM access_tokens WHERE expires_at <= ?').run(now);
+  const pending = db
+    .prepare('DELETE FROM pending_authorizations WHERE created_at <= ?')
+    .run(now - PENDING_AUTH_TTL);
+  const codes = db
+    .prepare('DELETE FROM authorization_codes WHERE created_at <= ?')
+    .run(now - AUTH_CODE_TTL);
+  return Number(tokens.changes) + Number(pending.changes) + Number(codes.changes);
 }
