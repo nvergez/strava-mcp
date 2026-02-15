@@ -30,6 +30,11 @@ const provider = new StravaOAuthProvider(
 
 const app = express();
 
+// Health check for load balancers / Fly.io
+app.get('/healthz', (_req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 // Rate limiting for auth endpoints (applies to /authorize, /token, /register, /strava/callback)
 const authLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
