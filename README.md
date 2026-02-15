@@ -2,6 +2,10 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) server for the [Strava API](https://developers.strava.com/). Exposes 29 read-only Strava tools over HTTP+SSE transport with full OAuth 2.0 authentication.
 
+## Hosted version
+
+A public instance is available at `https://strava-mcp.fly.dev/mcp` — no setup required. Point your MCP client to this URL and authenticate with your Strava account.
+
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) >= 24
