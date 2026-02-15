@@ -75,6 +75,22 @@ export const paginationSchema = {
     .describe('Items per page (default 30, max 200)'),
 };
 
+/**
+ * Parses an ISO 8601 date string into a Unix epoch timestamp (seconds).
+ * Date-only strings (e.g. "2026-02-09") are treated as midnight UTC.
+ * Full datetimes (e.g. "2026-02-09T14:30:00Z") are parsed as-is.
+ */
+export function parseISOToEpoch(value: string): number {
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00Z` : value;
+  const ms = Date.parse(normalized);
+  if (Number.isNaN(ms)) {
+    throw new Error(
+      `Invalid date: "${value}". Expected ISO 8601 format (e.g. "2026-02-09" or "2026-02-09T00:00:00Z").`,
+    );
+  }
+  return Math.floor(ms / 1000);
+}
+
 /** Adds pagination params to URLSearchParams if provided. */
 export function addPagination(
   params: URLSearchParams,

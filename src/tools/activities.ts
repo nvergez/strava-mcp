@@ -8,6 +8,7 @@ import {
   qs,
   paginationSchema,
   addPagination,
+  parseISOToEpoch,
 } from '../strava-client.js';
 
 const log = createLogger('tools:activities');
@@ -53,18 +54,20 @@ export function register(server: McpServer, database: DatabaseSync, apiBase: str
     {
       title: 'List Athlete Activities',
       description:
-        "List the authenticated athlete's activities. Results are sorted newest-first. Use before/after epoch timestamps to filter by date range. Strava rate limits apply (100 req/15 min, 1000/day).",
+        "List the authenticated athlete's activities. Results are sorted newest-first. Use before/after ISO 8601 dates to filter by date range. Strava rate limits apply (100 req/15 min, 1000/day).",
       inputSchema: {
         before: z
-          .number()
-          .int()
+          .string()
           .optional()
-          .describe('Only return activities before this Unix epoch timestamp'),
+          .describe(
+            'Only return activities before this date (ISO 8601, e.g. "2026-02-09" or "2026-02-09T00:00:00Z")',
+          ),
         after: z
-          .number()
-          .int()
+          .string()
           .optional()
-          .describe('Only return activities after this Unix epoch timestamp'),
+          .describe(
+            'Only return activities after this date (ISO 8601, e.g. "2026-02-01" or "2026-02-01T00:00:00Z")',
+          ),
         ...paginationSchema,
       },
     },
@@ -74,8 +77,8 @@ export function register(server: McpServer, database: DatabaseSync, apiBase: str
       const token = getStravaToken(database, extra.authInfo);
 
       const params = new URLSearchParams();
-      if (args.before != null) params.set('before', String(args.before));
-      if (args.after != null) params.set('after', String(args.after));
+      if (args.before != null) params.set('before', String(parseISOToEpoch(args.before)));
+      if (args.after != null) params.set('after', String(parseISOToEpoch(args.after)));
       addPagination(params, args);
 
       const data = await stravaFetch(apiBase, token, `/athlete/activities${qs(params)}`);
